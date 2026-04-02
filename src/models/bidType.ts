@@ -3,8 +3,10 @@ import * as Knex from 'knex';
 export default class BidTypeModel {
 
   getBidType(knex: Knex) {
-    return knex('l_bid_type')
-      .orderBy('bid_name');
+    return knex('l_bid_type as bt')
+      .select('bt.*', 'cp.co_purchase_name')
+      .leftJoin('bi_co_purchase as cp', 'cp.co_purchase_id', 'bt.co_purchase_id')
+      .orderBy('bt.bid_name');
   }
 
   insertBidType(knex: Knex, data: any) {

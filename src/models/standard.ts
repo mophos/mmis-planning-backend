@@ -64,6 +64,11 @@ export default class StandardModel {
       .orderBy('bid_name');
   }
 
+  getCoPurchase(db: Knex) {
+    return db('bi_co_purchase')
+      .orderBy('co_purchase_id');
+  }
+
   getStatus(db: Knex) {
     return db('cm_status')
       .orderBy('status_name');

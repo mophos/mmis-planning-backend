@@ -68,6 +68,19 @@ router.get('/bidtypes', async (req, res, next) => {
   }
 });
 
+router.get('/copurchase', async (req, res, next) => {
+  let db = req.db;
+
+  try {
+    let rs: any = await stdModel.getCoPurchase(db);
+    res.send({ ok: true, rows: rs });
+  } catch (error) {
+    res.send({ ok: false, error: error.message });
+  } finally {
+    db.destroy();
+  }
+});
+
 router.get('/search/labelers', async (req, res, next) => {
   let db = req.db;
   let type = req.query.type;

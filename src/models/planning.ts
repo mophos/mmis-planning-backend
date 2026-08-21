@@ -35,12 +35,43 @@ export default class PlanningModel {
       .update(data);
   }
 
+  /**
+   * แผนฉบับที่ยังใช้งานอยู่ (ไม่ใช่ประวัติ) ที่ปีและชื่อตรงกัน
+   * ใช้กันไม่ให้สร้างแผนชื่อซ้ำในปีเดียวกัน
+   *
+   * ต้องกรอง is_active ด้วย ไม่ใช่แค่ history_hdr_id
+   * เพราะการรวมแผนปิดแผนต้นทางด้วย is_active='N' แต่ไม่ได้ตั้ง history_hdr_id
+   * แผนพวกนั้นจึงหายจากหน้ารายการแต่ยังค้างอยู่ในฐาน
+   * ถ้าไม่กรอง ผู้ใช้จะตั้งชื่อซ้ำกับแผนที่ตัวเองมองไม่เห็นไม่ได้ แล้วงงว่าทำไม
+   */
+  findActivePlanningByName(knex: Knex, planningYear: any, planningName: any) {
+    return knex('bm_planning_header')
+      .select('planning_hdr_id')
+      .where('planning_year', planningYear)
+      .andWhere('planning_name', planningName)
+      .andWhere('is_active', 'Y')
+      .whereNull('history_hdr_id')
+      .limit(1);
+  }
+
+  /**
+   * ค้นด้วย ปี + ชื่อแผน ซึ่ง "ไม่ unique" ในความเป็นจริง
+   *
+   * เส้นทางสร้างแผนใหม่ (POST /) ไม่ได้ปิดแผนเดิมที่ชื่อและปีซ้ำกัน
+   * จึงมีแผนชื่อเดียวกันปีเดียวกันได้หลายฉบับพร้อมกัน
+   * (ตรวจฐาน dev แล้วพบ "จัดซื้อยา" ปี 2020 มี 2 ฉบับที่ยังใช้งานอยู่)
+   *
+   * ผู้เรียกใช้ result[0].confirmed ตัดสินว่าจะแก้ทับหรือสร้างฉบับใหม่
+   * ถ้าไม่เรียงลำดับ MySQL จะคืนแถวไหนก็ได้ ผลลัพธ์จึงไม่แน่นอน
+   * เรียงจากฉบับล่าสุดไว้ก่อน เพื่อให้ตัดสินจากสถานะของฉบับที่ใหม่ที่สุดเสมอ
+   */
   checkPlanningConfirm(knex: Knex, planningYear: any, planningName: any) {
     return knex('bm_planning_header as ph')
       .select('confirmed')
       .where('planning_year', planningYear)
       .andWhere('planning_name', planningName)
-      .whereNull('history_hdr_id');
+      .whereNull('history_hdr_id')
+      .orderBy('planning_hdr_id', 'desc');
   }
 
   updatePlanningInactive(knex: Knex, planningYear: any, planningName: any, planningHeaderId: any) {
@@ -86,7 +117,19 @@ export default class PlanningModel {
       .where('planning_hdr_id', headerId);
   }
 
-  getPlanningForCopy(knex: Knex, headerId: any, planningYear: any) {
+  /**
+   * !! ต้องกรอง warehouse_id ด้วยเสมอ
+   *
+   * bm_planning_forecast มี primary key เป็น (generic_id, warehouse_id, forecast_year)
+   * ยาตัวเดียวกันจึงมีได้หลายแถวในปีเดียวกัน แถวละคลัง
+   * (ตรวจฐาน dev แล้วมี 2 คลัง และยา 2,476 จาก 2,480 ตัวมีครบทั้งสองคลัง)
+   *
+   * ถ้า join โดยไม่กรองคลัง รายการเดียวจะไปเจอ forecast หลายแถว
+   * แล้วรายการยาในแผนที่คัดลอกมาจะซ้ำเป็นจำนวนเท่าของคลัง
+   *
+   * getForecastList() และ getForecast() กรองคลังอยู่แล้ว ที่นี่คือจุดเดียวที่ตกหล่น
+   */
+  getPlanningForCopy(knex: Knex, headerId: any, planningYear: any, warehouseId: any) {
     return knex('bm_planning_detail as pd')
       .select('mg.generic_name', 'mg.generic_type_id'
         , 'pd.generic_id', 'pd.unit_generic_id', 'pd.unit_cost', 'pd.primary_unit_id'
@@ -102,7 +145,8 @@ export default class PlanningModel {
       .join('mm_units as uf', 'uf.unit_id', 'ug.from_unit_id')
       .join('mm_units as ut', 'ut.unit_id', 'ug.to_unit_id')
       .join('mm_generic_types as gt', 'gt.generic_type_id', 'mg.generic_type_id')
-      .joinRaw(`join bm_planning_forecast as pf on pf.generic_id = pd.generic_id and pf.forecast_year = '${planningYear}' `)
+      // ผูกค่าเป็นพารามิเตอร์ ไม่ต่อสตริง — planningYear มาจาก req.body ของผู้ใช้
+      .joinRaw('join bm_planning_forecast as pf on pf.generic_id = pd.generic_id and pf.forecast_year = ? and pf.warehouse_id = ? ', [planningYear, warehouseId])
       .leftJoin('mm_generic_accounts as ga', 'ga.account_id', 'mg.account_id')
       .where('planning_hdr_id', headerId);
   }
@@ -112,6 +156,26 @@ export default class PlanningModel {
       .insert(data);
   }
 
+  /**
+   * !! หน่วยของข้อมูลในตารางนี้ไม่เหมือนกันทุกคอลัมน์ — อ่านก่อนเขียน query ใหม่
+   *
+   * จำนวนทั้งหมด (q1-q4, qty, estimate_qty, stock_qty, estimate_buy, rate_*)
+   * ถูกคูณ conversion_qty ตอนบันทึก จึงเก็บเป็น "หน่วยย่อย" (เช่น เม็ด)
+   *
+   * แต่ unit_cost และ amount ไม่ถูกแปลง ยังเป็น "หน่วยบรรจุ" (เช่น กล่อง)
+   *
+   *   ผู้ใช้กรอก 20 กล่อง x 250 บาท/กล่อง = 5,000 บาท   (1 กล่อง = 25 เม็ด)
+   *   เก็บลงฐาน  qty = 500 (เม็ด) · unit_cost = 250 (ต่อกล่อง) · amount = 5,000
+   *
+   * ผลคือ qty x unit_cost != amount ในยาที่ขนาดบรรจุมากกว่า 1
+   * (ตรวจบนฐาน dev แล้ว 659 จาก 676 แถวที่ขนาดบรรจุ > 1 เป็นแบบนี้)
+   *
+   * ทุกหน้าจอและรายงานในระบบใช้ amount ตรงๆ หรือคำนวณใหม่จากหน่วยบรรจุ จึงยังแสดงถูกต้อง
+   * แต่ใครก็ตามที่เขียน query ใหม่แล้วคูณ qty x unit_cost เองจะได้ตัวเลขผิด
+   *
+   * ตัดสินใจไว้ (2026-08-13) ว่ายังไม่แก้ เพราะต้องแปลงข้อมูลที่บันทึกไปแล้วของทุกโรงพยาบาล
+   * ถ้าจะแก้ ต้องสำรวจก่อนว่ามีโมดูลไหนอ่าน qty/amount จากตารางนี้บ้าง
+   */
   insertPlanningDetailFromTmp(knex: Knex, headerId: any, _uuid: any) {
     let sql = `
       insert into bm_planning_detail (
@@ -157,8 +221,14 @@ export default class PlanningModel {
           , knex.raw('IFNULL(pt.q2 * pt.conversion_qty, pf.y4q2) as y4q2')
           , knex.raw('IFNULL(pt.q3 * pt.conversion_qty, pf.y4q3) as y4q3')
           , knex.raw('IFNULL(pt.q4 * pt.conversion_qty, pf.y4q4) as y4q4'))
-        .joinRaw(`left join bm_planning_tmp as pt on pt.generic_id = pf.generic_id and pt.tmp_id = ${tmpId}`)
+        // route แปลง tmpId เป็นตัวเลขมาแล้ว (+tmpId) จึงไม่ใช่ช่องโหว่
+        // แต่ผูกค่าเป็นพารามิเตอร์ไว้ด้วย จะได้ไม่ต้องพึ่งว่าผู้เรียกทุกที่จะแปลงให้เสมอ
+        .joinRaw('left join bm_planning_tmp as pt on pt.generic_id = pf.generic_id and pt.tmp_id = ?', [tmpId])
         .where('pf.generic_id', genericId)
+        // ต้องกรองคลังเหมือนสาขา "เพิ่มรายการใหม่" ด้านล่าง
+        // bm_planning_forecast เก็บคลังละแถว ถ้าไม่กรองจะได้หลายแถวแล้วหน้าจอหยิบ rows[0]
+        // ซึ่งอาจเป็นค่าของคลังอื่น ทำให้อัตราใช้ ยอดคงคลัง และประมาณการซื้อผิดคลัง
+        .andWhere('pf.warehouse_id', warehouseId)
         .andWhere('pf.forecast_year', forecastYear);
     } else { //new row
       return knex('bm_planning_forecast as pf')
@@ -175,8 +245,14 @@ export default class PlanningModel {
       .orderBy('ph.planning_hdr_id', 'desc');
   }
 
+  /**
+   * planningYear มาจาก req.body ของผู้ใช้ ต้องผูกเป็นพารามิเตอร์
+   * เดิมต่อเข้าสตริงตรงๆ ซึ่งสั่งคำสั่งที่สองต่อท้ายได้เพราะ multipleStatements เปิดอยู่
+   */
   callForecast(knex: Knex, planningYear: any, warehouseId: any) {
-    return knex.raw(`call forecast_v2(${planningYear}, ${warehouseId})`);
+    // procedure รับ INT ทั้งสองตัว แปลงเป็นตัวเลขก่อนผูกค่า
+    // จะได้ส่งชนิดข้อมูลตรงกับของเดิมเป๊ะ และค่าที่ไม่ใช่ตัวเลขถูกปฏิเสธตั้งแต่ต้นทาง
+    return knex.raw('call forecast_v2(?, ?)', [+planningYear, +warehouseId]);
   }
 
   getForecastList(knex: Knex, forecastYear: any, _genericGroups: any[], warehouseId: any) {
@@ -205,15 +281,25 @@ export default class PlanningModel {
       .insert(data);
   }
 
-  updatePlanningTmp(knex: Knex, id: any, data: any) {
+  /**
+   * ต้องผูก uuid ด้วยเสมอ ไม่ใช่ tmp_id อย่างเดียว
+   *
+   * tmp_id เป็น auto_increment ที่เดาได้ ส่วน uuid เป็นค่าสุ่มประจำร่างแผนของแต่ละคน
+   * ถ้าผูกด้วย tmp_id อย่างเดียว ผู้ใช้ที่ยิง API เองจะแก้หรือลบรายการ
+   * ในร่างแผนของคนอื่นได้ และเส้นทาง update ยังเขียน uuid ทับ
+   * เท่ากับย้ายรายการของคนอื่นมาเป็นของตัวเอง
+   */
+  updatePlanningTmp(knex: Knex, id: any, uuid: any, data: any) {
     return knex('bm_planning_tmp')
       .where('tmp_id', id)
+      .andWhere('uuid', uuid)
       .update(data);
   }
 
-  deletePlanningTmp(knex: Knex, id: any[]) {
+  deletePlanningTmp(knex: Knex, id: any[], uuid: any) {
     return knex('bm_planning_tmp')
       .whereIn('tmp_id', id)
+      .andWhere('uuid', uuid)
       .delete();
   }
 
@@ -249,57 +335,131 @@ export default class PlanningModel {
     return sql;
   }
 
+  /**
+   * ต้อง join mm_generics เหมือน getPlanningTmp
+   *
+   * เดิมไม่ join ทำให้จำนวนกับยอดเงินนับรวมแถวที่ generic_id ว่าง (จับคู่ไม่ได้)
+   * ซึ่ง getPlanningTmp กรองทิ้งเพราะใช้ inner join — ผลคือท้ายตารางบอก 722 รายการ
+   * แต่แสดงจริง 700 และยอดเงินรวมนับรายการที่ผู้ใช้มองไม่เห็นและแก้ไขไม่ได้
+   */
   countPlanningTmp(knex: Knex, _uuid: any, query: any, genericType: any) {
-    let sql = knex('bm_planning_tmp')
+    let sql = knex('bm_planning_tmp as b')
       .count('* as total')
-      .sum('amount as amount')
-      .where('uuid', _uuid);
+      .sum('b.amount as amount')
+      .join('mm_generics as mg', 'b.generic_id', 'mg.generic_id')
+      .where('b.uuid', _uuid);
     if (query) {
       let _query = `%${query}%`;
-      sql.andWhere('generic_name', 'like', _query);
+      sql.andWhere('b.generic_name', 'like', _query);
     }
     if (genericType) {
-      sql.andWhere('generic_type_id', genericType);
+      sql.andWhere('b.generic_type_id', genericType);
     }
     return sql;
   }
 
+  /**
+   * ตัดแถวที่จับคู่ไม่ได้ออกด้วย ให้ตรงกับที่หน้าจอเห็นและกับ countPlanningTmp
+   * แถวพวกนั้นถูกทิ้งตอนบันทึกแผนอยู่แล้ว (insertPlanningDetailFromTmp กรอง generic_id != '')
+   * การเอาไปคิดยอดหรือปรับแผนจึงไม่มีประโยชน์และทำให้สัดส่วนการปรับเพี้ยน
+   */
   getPlanningForAdjust(knex: Knex, _uuid: any) {
     return knex('bm_planning_tmp')
       .where('uuid', _uuid)
-      .andWhere('freeze', 'N');
+      .andWhere('freeze', 'N')
+      .whereNot('generic_id', '');
   }
 
   getPlanningFreezeAmount(knex: Knex, _uuid: any) {
     return knex('bm_planning_tmp')
       .sum('amount as amount')
       .where('uuid', _uuid)
-      .andWhere('freeze', 'Y');
+      .andWhere('freeze', 'Y')
+      .whereNot('generic_id', '');
   }
 
-  updatePlanningTmpAfterUpload(knex: Knex, _uuid: any) {
-    let sql = `
-    update bm_planning_tmp t,
-    (
-      select tmp.tmp_id, mg.generic_id, unt.unit_generic_id, unt.to_unit_id, unt.qty
-      from bm_planning_tmp tmp
-      join mm_generics mg on mg.generic_name = tmp.generic_name
-      join (
-        select ug.unit_generic_id, ug.to_unit_id, ug.generic_id, ug.qty, concat(fu.unit_name, ' ', '(', ug.qty, ' ', tu.unit_name, ')') unit_desc
-        from mm_unit_generics ug
-        join mm_units fu on fu.unit_id = ug.from_unit_id
-        join mm_units tu on tu.unit_id = ug.to_unit_id
-      ) unt on unt.generic_id = mg.generic_id and unt.unit_desc = tmp.unit_desc
-      where uuid = ?
-    ) s
-    set t.generic_id = s.generic_id,
-        t.unit_generic_id = s.unit_generic_id,
-        t.primary_unit_id = s.to_unit_id,
-        t.conversion_qty = s.qty
-    where t.tmp_id = s.tmp_id
-    `;
-    return knex.raw(sql, [_uuid])
+  /** ใช้ตรวจก่อนเพิ่มรายการ ว่ายาตัวนี้มีอยู่ในแผนที่กำลังทำอยู่แล้วหรือยัง */
+  findPlanningTmpByGeneric(knex: Knex, _uuid: any, genericId: any) {
+    return knex('bm_planning_tmp')
+      .select('tmp_id', 'generic_name')
+      .where('uuid', _uuid)
+      .andWhere('generic_id', genericId)
+      .limit(1);
   }
+
+  /**
+   * รายการยาทั้งหมดสำหรับจับคู่ตอนนำเข้า Excel
+   *
+   * ใช้ working_code (รหัสยา) เป็นกุญแจหลัก ไม่ใช่ generic_name
+   * เพราะชื่อยาซ้ำกันได้จริง ทำให้จับคู่ได้หลายแถวแล้วหยิบมาผิดตัวโดยไม่มีอะไรฟ้อง
+   * ส่วน working_code ไม่ซ้ำและไม่ว่าง
+   */
+  getGenericsForImport(knex: Knex) {
+    return knex('mm_generics')
+      .select('generic_id', 'working_code', 'generic_name', 'generic_type_id',
+        'planning_unit_generic_id')
+      .where('mark_deleted', 'N');
+  }
+
+  /**
+   * ขนาดบรรจุทั้งหมด พร้อมข้อความหน่วยในรูปแบบเดียวกับที่ export ออกไป
+   * ต้องตรงกับที่ routes ประกอบไว้: `${from_unit_name} (${qty} ${to_unit_name})`
+   */
+  getUnitGenericsForImport(knex: Knex) {
+    return knex('mm_unit_generics as ug')
+      .select('ug.unit_generic_id', 'ug.generic_id', 'ug.to_unit_id', 'ug.qty',
+        'ug.is_active', 'ug.is_deleted',
+        knex.raw(`concat(fu.unit_name, ' ', '(', ug.qty, ' ', tu.unit_name, ')') as unit_desc`))
+      .join('mm_units as fu', 'fu.unit_id', 'ug.from_unit_id')
+      .join('mm_units as tu', 'tu.unit_id', 'ug.to_unit_id');
+  }
+
+  /**
+   * เก็บกวาดร่างแผนที่ถูกทิ้งค้างไว้
+   *
+   * uuid ถูกสร้างใหม่ทุกครั้งที่เปิดหน้าสร้างหรือหน้าแก้ไข และหน้าแก้ไข
+   * คัดลอกรายละเอียดแผนลง tmp ตั้งแต่ตอนเปิด ถ้าผู้ใช้ปิดแท็บไปเฉย ๆ
+   * แถวชุดนั้นจะค้างถาวรเพราะไม่มีใครล้าง
+   * (ตรวจฐาน dev แล้วพบ 66% ของตารางเป็นของที่ค้างมาเกิน 1 ปี เก่าสุดปี 2018)
+   *
+   * วัดอายุจาก update_date ซึ่งเป็น timestamp ที่มี on update CURRENT_TIMESTAMP
+   * จึงขยับเองทุกครั้งที่มีการแก้แถวนั้น ใครยังทำงานค้างอยู่จะไม่ถูกลบ
+   *
+   * ลบทีละก้อนด้วย limit ไม่ลบรวดเดียว เพราะครั้งแรกจะเจอของเก่าหลายหมื่นแถว
+   * ปล่อยให้ทยอยหมดไปเองจากการใช้งานปกติ จะได้ไม่ต้องไปรัน SQL ที่โรงพยาบาลทุกแห่ง
+   */
+  clearExpiredPlanningTmp(knex: Knex, currentUuid: any, days: number, limit: number) {
+    const sql = `
+      delete from bm_planning_tmp
+      where update_date < now() - interval ? day
+        and (uuid is null or uuid <> ?)
+      limit ?`;
+    return knex.raw(sql, [days, currentUuid || '', limit]);
+  }
+
+  /**
+   * นับเฉพาะแถวที่จะถูกบันทึกลงแผนจริง
+   *
+   * ต้องกรอง generic_id != '' ให้ตรงกับเงื่อนไขใน insertPlanningDetailFromTmp
+   * ไม่งั้นจะนับแถวที่จับคู่ไม่ได้รวมเข้าไปด้วย แล้วปล่อยให้บันทึกเป็นแผนเปล่าผ่านไป
+   */
+  countPlanningTmpForSave(knex: Knex, _uuid: any) {
+    return knex('bm_planning_tmp')
+      .count('* as total')
+      .where('uuid', _uuid)
+      .whereNot('generic_id', '');
+  }
+
+  /**
+   * ขนาดบรรจุที่แต่ละตัวยาใช้อยู่ในแผนก่อนนำเข้าทับ
+   * ใช้เลือกให้ตรงของเดิม เมื่อไฟล์ไม่มีคอลัมน์ [ระบบ] มาช่วยระบุ
+   */
+  getPlanningTmpUnits(knex: Knex, uuid: any) {
+    return knex('bm_planning_tmp')
+      .select('generic_id', 'unit_generic_id')
+      .where('uuid', uuid);
+  }
+
 
   getPlanningDetailForMerge(knex: Knex, headerIds: any[]) {
     return knex('bm_planning_detail as pd')

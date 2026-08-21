@@ -167,6 +167,9 @@ router.get('/report', async (req, res, next) => {
     res.render('error404', {
       title: error
     })
+  } finally {
+    // เดิม route นี้ไม่ปิด connection ทำให้ pool รั่วทุกครั้งที่เปิดรายงาน
+    req.db.destroy();
   }
 });
 

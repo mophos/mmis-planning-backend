@@ -196,9 +196,23 @@ export default class BudgetModel {
       .insert(data);
   }
 
+  /**
+   * subBudget มาจาก query string เป็นรายการ id คั่นด้วยจุลภาค
+   *
+   * เดิมต่อเข้า SQL ตรงๆ ด้วย whereRaw ซึ่งเปิดช่อง SQL injection เต็มๆ
+   * และ connection ตั้ง multipleStatements: true ไว้ ผู้เรียกจึงต่อคำสั่งที่สองได้
+   * เช่น "1); DROP TABLE xxx; -- " ใช้ whereIn ให้ knex ผูกค่าเป็นพารามิเตอร์แทน
+   *
+   * กรองเอาเฉพาะตัวเลขจริง ค่าที่ไม่ใช่ตัวเลขถูกทิ้งไปไม่ต้องพยายามลบ
+   */
   deleteBudgetWarehouse(knex: Knex, subBudget: any) {
+    const ids = String(subBudget || '')
+      .split(',')
+      .map(v => +String(v).trim())
+      .filter(v => Number.isInteger(v) && v > 0);
+
     return knex('bm_budget_detail_warehouse')
-      .whereRaw(`bgdetail_washouers_id in (${subBudget})`)
+      .whereIn('bgdetail_washouers_id', ids)
       .del()
   }
 
